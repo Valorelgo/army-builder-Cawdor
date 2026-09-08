@@ -93,9 +93,14 @@ function getFighterRank(xp) {
 function getPendingAdvances(m) {
     let currentXP = getFighterXP(m);
     let currentRank = getFighterRank(currentXP);
+    
+    // On calcule le rang initial d'après l'XP de départ de la carte (ex: 0 XP)
     if (m.startingRank === undefined) {
-        m.startingRank = currentRank;
+        let charDef = (typeof db !== 'undefined' && db.characters) ? db.characters.find(c => c.id === m.charId) : null;
+        let startXP = charDef ? (charDef.starting_xp || 0) : 0;
+        m.startingRank = getFighterRank(startXP);
     }
+    
     let taken = m.advancesCount || 0;
     let pending = currentRank - m.startingRank - taken;
     return Math.max(0, pending);
@@ -253,73 +258,81 @@ function safeNavigate(target) {
         navigateTo(target);
     }
 }
-function getFighterXP(m) {
-    if (m.xp !== undefined && m.xp !== null) return m.xp;
-    if (typeof db !== 'undefined' && db.characters) {
-        let charDef = db.characters.find(c => c.name === m.charName || (m.type && c.name === m.type[0]));
-        if (charDef) {
-            let startXp = charDef.starting_xp !== undefined ? charDef.starting_xp : (charDef.xp !== undefined ? charDef.xp : 0);
-            m.xp = startXp;
-            return startXp;
-        }
-    }
-    m.xp = 0;
-    return 0;
+
+function getFighterXP(fighter) {
+    if (!fighter) return 0;
+    if (fighter.xp !== undefined) return fighter.xp;
+
+    let charDef = db.characters ? db.characters.find(c => c.id === fighter.charId) : null;
+    return charDef ? (charDef.starting_xp || 0) : 0;
 }
 
 // ==========================================
 // MENU & MODALE DE LA RÉSERVE (STASH X/Y)
 // ==========================================
+function calculateResellPrice(cost) {
+    if (!cost || cost <= 0) return 0;
+    return Math.ceil((cost / 2) / 5) * 5;
+}
+
 function openStashModal() {
     if (!currentGang) return;
     if (!currentGang.stash) currentGang.stash = [];
 
     let inventoryMap = {};
 
+    // 1. Comptage des équipements portés par les guerriers
     (currentGang.members || []).forEach(m => {
         (m.weapons || []).forEach(w => {
             let wName = w.name;
-            if (!inventoryMap[wName]) inventoryMap[wName] = { type: 'Arme', equipped: 0, stash: 0 };
+            if (!inventoryMap[wName]) inventoryMap[wName] = { type: 'Arme', equipped: 0, stash: 0, cost: w.cost || w.cost_credits || 0 };
             inventoryMap[wName].equipped++;
 
             if (w.accessory && w.accessory.name) {
                 let accName = w.accessory.name;
-                if (!inventoryMap[accName]) inventoryMap[accName] = { type: 'Accessoire', equipped: 0, stash: 0 };
+                if (!inventoryMap[accName]) inventoryMap[accName] = { type: 'Accessoire', equipped: 0, stash: 0, cost: w.accessory.cost || 0 };
                 inventoryMap[accName].equipped++;
             }
         });
 
         if (m.armor && m.armor.name) {
             let aName = m.armor.name;
-            if (!inventoryMap[aName]) inventoryMap[aName] = { type: 'Armure', equipped: 0, stash: 0 };
+            if (!inventoryMap[aName]) inventoryMap[aName] = { type: 'Armure', equipped: 0, stash: 0, cost: m.armor.cost || 0 };
             inventoryMap[aName].equipped++;
         }
 
         (m.equipment || []).forEach(e => {
             let eName = e.name;
-            if (!inventoryMap[eName]) inventoryMap[eName] = { type: 'Équipement', equipped: 0, stash: 0 };
+            if (!inventoryMap[eName]) inventoryMap[eName] = { type: 'Équipement', equipped: 0, stash: 0, cost: e.cost || e.cost_credits || 0 };
             inventoryMap[eName].equipped++;
         });
     });
 
+    // 2. Comptage des objets disponibles dans la réserve (Stash)
     (currentGang.stash || []).forEach(item => {
         let name = typeof item === 'string' ? item : item.name;
         let type = (typeof item === 'object' && item.type) ? item.type : 'Matériel';
-        if (!inventoryMap[name]) inventoryMap[name] = { type: type, equipped: 0, stash: 0 };
+        let cost = (typeof item === 'object') ? (item.cost || item.cost_credits || item.price || 0) : 0;
+        
+        if (!inventoryMap[name]) {
+            inventoryMap[name] = { type: type, equipped: 0, stash: 0, cost: cost };
+        }
         inventoryMap[name].stash++;
+        if (cost > 0 && !inventoryMap[name].cost) inventoryMap[name].cost = cost;
     });
 
     let html = `
         <div style="max-height:60vh; overflow-y:auto;">
-            <p><small>Format <strong>X/Y</strong> : <strong>X</strong> = Équipés sur guerriers / <strong>Y</strong> = Total possédés par le gang.</small></p>
+            <p><small>Format <strong>X/Y</strong> : <strong>X</strong> = Équipés sur guerriers / <strong>Y</strong> = Total possédés par le gang. Revente à la moitié (arrondie aux 5 cr supérieurs).</small></p>
             <hr style="margin:10px 0; border-color:#333;">
-            <table style="width:100%; border-collapse:collapse; text-align:left;">
+            <table style="width:100%; border-collapse:collapse; text-align:left; font-size:13px;">
                 <thead>
                     <tr style="border-bottom:2px solid var(--accent-purple, #9b59b6);">
                         <th style="padding:6px;">Objet / Équipement</th>
                         <th style="padding:6px;">Type</th>
                         <th style="padding:6px; text-align:center;">Équipés / Total (X/Y)</th>
                         <th style="padding:6px; text-align:center;">En Stock</th>
+                        <th style="padding:6px; text-align:right;">Action</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -327,13 +340,15 @@ function openStashModal() {
 
     let itemKeys = Object.keys(inventoryMap).sort();
     if (itemKeys.length === 0) {
-        html += `<tr><td colspan="4" style="padding:15px; text-align:center; color:#888;">Le gang ne possède aucun matériel.</td></tr>`;
+        html += `<tr><td colspan="5" style="padding:15px; text-align:center; color:#888;">Le gang ne possède aucun matériel.</td></tr>`;
     } else {
         itemKeys.forEach(itemName => {
             let data = inventoryMap[itemName];
             let X = data.equipped;
             let stashCount = data.stash;
             let Y = X + stashCount;
+            let sellPrice = calculateResellPrice(data.cost);
+            let cleanName = itemName.replace(/'/g, "\\'");
 
             html += `
                 <tr style="border-bottom:1px solid #222;">
@@ -342,6 +357,11 @@ function openStashModal() {
                     <td style="padding:6px; text-align:center;"><strong style="color:var(--accent-cyan, #00d2d3);">${X}/${Y}</strong></td>
                     <td style="padding:6px; text-align:center;">
                         ${stashCount > 0 ? `<span style="color:#2ecc71;">${stashCount} dispo</span>` : `<span style="color:#888;">0 dispo</span>`}
+                    </td>
+                    <td style="padding:6px; text-align:right;">
+                        ${stashCount > 0 
+                            ? `<button class="btn btn-cyan" style="padding:2px 8px; font-size:11px;" onclick="sellStashItem('${cleanName}', ${sellPrice})">💰 Vendre (${sellPrice} cr)</button>` 
+                            : `<span style="color:#555; font-size:11px;">—</span>`}
                     </td>
                 </tr>
             `;
@@ -357,6 +377,28 @@ function openStashModal() {
     `;
 
     if (typeof openModal === 'function') openModal("📦 Réserve du Gang (Stash)", html);
+}
+
+function sellStashItem(itemName, sellPrice) {
+    if (!currentGang || !currentGang.stash) return;
+
+    // Recherche le premier objet correspondant dans le Stash
+    let idx = currentGang.stash.findIndex(item => (typeof item === 'string' ? item : item.name) === itemName);
+    if (idx === -1) return;
+
+    if (!confirm(`Vendre 1x "${itemName}" de la réserve pour ${sellPrice} crédits ?`)) return;
+
+    // Retrait de l'objet et ajout des crédits
+    currentGang.stash.splice(idx, 1);
+    currentGang.credits = (currentGang.credits || 0) + sellPrice;
+
+    safeSave();
+    openStashModal();
+
+    // Rechargement de la vue si on est dans le post-cycle
+    if (typeof appState !== 'undefined' && appState.view === 'post-cycle') {
+        renderPostCycleView(document.getElementById('main-content'));
+    }
 }
 
 // ==========================================
@@ -453,53 +495,404 @@ function openAddCustomTerritoryPrompt() {
 // ==========================================
 // GAME SETUP (Sélection des participants)
 // ==========================================
+// ==========================================
+// CONFIGURATION DES SCÉNARIOS & PRÉPARATION
+// ==========================================
+const SCENARIO_TYPES = {
+    intensification: {
+        name: "Intensification de la bataille",
+        desc: "Choisissez 3 guerriers. Le programme tirera 1 à 3 guerriers aléatoires. Vous pourrez ensuite choisir jusqu'à 5 renforts."
+    },
+    donnez_tout: {
+        name: "Donnez tout !",
+        desc: "Choisissez jusqu'à 10 guerriers dans votre liste."
+    },
+    patrouille: {
+        name: "Patrouille",
+        desc: "Choisissez 3 guerriers. Le programme ajoutera 4 guerriers au hasard."
+    },
+    attaque_surprise: {
+        name: "Attaque surprise !",
+        desc: "Attaquant (4 choisis + 4 au hasard) | Défenseur (3 choisis + jusqu'à 7 renforts)."
+    },
+    force_intervention: {
+        name: "Force d'intervention",
+        desc: "Choisissez jusqu'à 5 guerriers dans votre liste."
+    },
+    force_reconnaissance: {
+        name: "Force de reconnaissance",
+        desc: "Le programme détermine un nombre (1 à 3) de guerriers à choisir, puis ajoute 5 guerriers au hasard."
+    }
+};
+
+let setupState = {
+    scenarioKey: 'intensification',
+    role: 'attacker', // 'attacker' ou 'defender' pour Attaque surprise
+    piousActive: false,
+    step: 1, // 1 = Choix initial, 2 = Tirage effectué / Choix des renforts
+    reconCount: Math.floor(Math.random() * 3) + 1,
+    initialPickedIds: [],
+    randomDrawnIds: [],
+    reinforcementPickedIds: [],
+    piousPickedId: null
+};
+
+function resetSetupState() {
+    setupState = {
+        scenarioKey: 'intensification',
+        role: 'attacker',
+        piousActive: false,
+        step: 1,
+        reconCount: Math.floor(Math.random() * 3) + 1,
+        initialPickedIds: [],
+        randomDrawnIds: [],
+        reinforcementPickedIds: [],
+        piousPickedId: null
+    };
+}
+
+function isProspect(m) {
+    if (!m || !m.type) return false;
+    let types = m.type.map(t => t.toLowerCase());
+    return types.includes('prospect') || types.includes('juve') || (m.charId && (m.charId.includes('wyld') || m.charId.includes('little_sister')));
+}
+
+function getRandomFighters(availableList, count) {
+    let pool = [...availableList];
+    let picked = [];
+    let numToPick = Math.min(count, pool.length);
+    for (let i = 0; i < numToPick; i++) {
+        let randIdx = Math.floor(Math.random() * pool.length);
+        picked.push(pool[randIdx]);
+        pool.splice(randIdx, 1);
+    }
+    return picked;
+}
+
+// ==========================================
+// RENDU DU MENU DE SETUP EN CAMPAGNE
+// ==========================================
 function renderGameSetup(container) {
     setGameHeaderVisibility(false);
-    
+
     if (!currentGang) {
         container.innerHTML = `<div class="card"><p>Aucun gang sélectionné.</p><button onclick="safeNavigate('gang-manage')">Retour</button></div>`;
         return;
     }
 
-    let isQuick = typeof appState !== 'undefined' && appState.isQuickMatch;
+    // Si c'est une Partie Rapide, on garde le mode de sélection simple
+    if (typeof appState !== 'undefined' && appState.isQuickMatch) {
+        renderQuickMatchSetup(container);
+        return;
+    }
+
+    let currentScenario = SCENARIO_TYPES[setupState.scenarioKey];
+    let availableMembers = (currentGang.members || []).filter(m => !m.recovery);
 
     let html = `
         <div class="card">
-            <h2>Préparation de la Partie ${isQuick ? '(⚡ Partie Rapide)' : '(⚔️ Partie de Campagne)'}</h2>
-            <p>Sélectionnez les combattants qui participent à l'affrontement :</p>
-            ${isQuick ? '<p style="color:var(--accent-purple); font-size:12px; margin-top:4px;">💡 Mode Partie Rapide : aucune modification ne sera enregistrée sur le gang à la fin de l\'affrontement.</p>' : ''}<br>
+            <h2>Préparation de la Partie (⚔️ Campagne)</h2>
+            
+            <!-- MENU DÉROULANT DES SCÉNARIOS -->
+            <div style="margin-bottom:12px;">
+                <label style="font-weight:bold;">Type de recrutement / Scénario :</label>
+                <select id="scenario-select" style="width:100%; padding:8px; margin-top:4px; background:#222; color:#fff; border:1px solid var(--accent-purple);" onchange="changeScenario(this.value)">
+                    ${Object.keys(SCENARIO_TYPES).map(key => `
+                        <option value="${key}" ${setupState.scenarioKey === key ? 'selected' : ''}>${SCENARIO_TYPES[key].name}</option>
+                    `).join('')}
+                </select>
+            </div>
+
+            <!-- DESCRIPTION DU SCÉNARIO SELECTIONNÉ -->
+            <div style="background:#181824; border:1px solid var(--accent-purple); padding:10px; border-radius:5px; margin-bottom:12px; font-size:13px;">
+                <strong style="color:var(--accent-cyan);">${currentScenario.name}</strong><br>
+                <span>${currentScenario.desc}</span>
+            </div>
+
+            <!-- CHOIX ATTAQUANT / DÉFENSEUR (Attaque surprise) -->
+            ${setupState.scenarioKey === 'attaque_surprise' ? `
+                <div style="margin-bottom:12px; background:#111; padding:8px; border-radius:5px;">
+                    <label style="font-weight:bold; margin-right:10px;">Rôle :</label>
+                    <label style="margin-right:15px; cursor:pointer;">
+                        <input type="radio" name="role" value="attacker" ${setupState.role === 'attacker' ? 'checked' : ''} onchange="changeRole('attacker')"> Attaquant
+                    </label>
+                    <label style="cursor:pointer;">
+                        <input type="radio" name="role" value="defender" ${setupState.role === 'defender' ? 'checked' : ''} onchange="changeRole('defender')"> Défenseur
+                    </label>
+                </div>
+            ` : ''}
+
+            <!-- BOUTON PIOUS (BOOSTER PROSPECT) -->
+            <div style="margin-bottom:15px; display:flex; align-items:center; justify-content:space-between; background:#111; padding:8px 12px; border-radius:5px;">
+                <div>
+                    <strong>Règle "Pious"</strong><br>
+                    <small style="color:#aaa;">Autorise la sélection d'un Prospect supplémentaire en bonus.</small>
+                </div>
+                <button class="${setupState.piousActive ? 'btn btn-cyan' : 'btn'}" style="padding:4px 12px;" onclick="togglePious()">
+                    ${setupState.piousActive ? '✅ Pious Actif' : 'Activer Pious'}
+                </button>
+            </div>
+
+            <!-- RECTANGLE PIOUS SI ACTIF -->
+            ${setupState.piousActive ? renderPiousSection(availableMembers) : ''}
+
+            <hr style="border-color:#333; margin:15px 0;">
     `;
 
-    if (!currentGang.members || currentGang.members.length === 0) {
-        html += `<p>Aucun membre dans le gang.</p>`;
+    // INSTRUCTIONS DE SÉLECTION
+    if (setupState.step === 1) {
+        html += renderStep1View(availableMembers);
     } else {
-        currentGang.members.forEach((m, idx) => {
-            if (!m.recovery) {
-                html += `
-                    <div class="fighter-item">
-                        <div>
-                            <strong>${m.customName}</strong> (${m.charName})<br>
-                            <small>${(m.type || []).join(', ')} - Coût : ${m.totalCost || 0}c | XP : ${getFighterXP(m)}</small>
-                        </div>
-                        <div>
-                            <button onclick="inspectFighter(${idx})">👁️ Voir</button>
-                            <label style="margin-left:10px;">
-                                <input type="checkbox" class="roster-select" value="${idx}" checked> Participe
-                            </label>
-                        </div>
-                    </div>
-                `;
-            }
-        });
+        html += renderStep2View(availableMembers);
     }
 
     html += `
         <br>
-        <button onclick="startGame()">⚔️ Lancer la Partie</button>
-        <button class="btn-danger" onclick="safeNavigate('gang-manage')">Annuler</button>
+        <button class="btn-danger" style="margin-top:10px;" onclick="resetSetupState(); safeNavigate('gang-manage');">Annuler</button>
     </div>`;
 
     container.innerHTML = html;
+}
+
+// ==========================================
+// ÉTAPE 1 : CHOIX INITIAL DES GUERRIERS
+// ==========================================
+function renderStep1View(availableMembers) {
+    let key = setupState.scenarioKey;
+    let maxSelect = 0;
+    let labelHelp = "";
+
+    if (key === 'intensification') { maxSelect = 3; labelHelp = "Choisissez exactement 3 guerriers."; }
+    else if (key === 'donnez_tout') { maxSelect = 10; labelHelp = "Choisissez jusqu'à 10 guerriers."; }
+    else if (key === 'patrouille') { maxSelect = 3; labelHelp = "Choisissez exactement 3 guerriers."; }
+    else if (key === 'attaque_surprise') {
+        maxSelect = (setupState.role === 'attacker') ? 4 : 3;
+        labelHelp = (setupState.role === 'attacker') ? "Choisissez 4 guerriers." : "Choisissez 3 guerriers.";
+    }
+    else if (key === 'force_intervention') { maxSelect = 5; labelHelp = "Choisissez jusqu'à 5 guerriers."; }
+    else if (key === 'force_reconnaissance') { 
+        maxSelect = setupState.reconCount; 
+        labelHelp = `🎲 Tirage Force de reconnaissance : vous devez choisir ${setupState.reconCount} guerrier(s).`; 
+    }
+
+    let html = `
+        <h3>Étape 1 : Choix initial des combattants</h3>
+        <p style="color:var(--accent-cyan); font-size:13px; margin-bottom:10px;">${labelHelp}</p>
+        <div style="display:flex; flex-direction:column; gap:6px; max-height:40vh; overflow-y:auto; margin-bottom:15px;">
+    `;
+
+    availableMembers.forEach(m => {
+        if (m.id === setupState.piousPickedId) return; // Exclure le prospect Pious si déjà sélectionné
+
+        let isChecked = setupState.initialPickedIds.includes(m.id);
+        html += `
+            <div class="fighter-item" style="background:#111; padding:6px 10px;">
+                <div>
+                    <strong>${m.customName}</strong> (${m.charName})<br>
+                    <small style="color:#aaa;">${(m.type || []).join(', ')} - Coût : ${m.totalCost || 0}c</small>
+                </div>
+                <input type="checkbox" style="transform:scale(1.3);" ${isChecked ? 'checked' : ''} onchange="toggleInitialPick('${m.id}', ${maxSelect})">
+            </div>
+        `;
+    });
+
+    html += `</div>`;
+
+    // BOUTON DE VALIDATION ÉTAPE 1
+    if (key === 'donnez_tout' || key === 'force_intervention') {
+        html += `<button class="btn btn-cyan" onclick="startCampaignGame()">⚔️ Lancer la Partie (${setupState.initialPickedIds.length} guerriers)</button>`;
+    } else {
+        html += `<button class="btn btn-cyan" onclick="validateStep1()">🎲 Valider l'étape 1 et procéder aux tirages/renforts</button>`;
+    }
+
+    return html;
+}
+
+// ==========================================
+// ÉTAPE 2 : TIRAGE AUTOMATIQUE ET RENFORTS
+// ==========================================
+function renderStep2View(availableMembers) {
+    let key = setupState.scenarioKey;
+    
+    let initialFighters = availableMembers.filter(m => setupState.initialPickedIds.includes(m.id));
+    let randomFighters = availableMembers.filter(m => setupState.randomDrawnIds.includes(m.id));
+
+    let html = `
+        <h3>Étape 2 : Validation de l'escouade</h3>
+        
+        <div style="margin-bottom:10px;">
+            <strong>Guerriers sélectionnés :</strong> ${initialFighters.map(m => m.customName).join(', ')}
+        </div>
+    `;
+
+    if (randomFighters.length > 0) {
+        html += `
+            <div style="margin-bottom:10px; background:#181824; padding:8px; border-radius:5px; border:1px solid var(--accent-purple);">
+                <strong style="color:var(--accent-purple);">🎲 Guerriers ajoutés au hasard :</strong> ${randomFighters.map(m => m.customName).join(', ')}
+            </div>
+        `;
+    }
+
+    // SI RENFORTS DISPONIBLES (Intensification ou Attaque surprise Défenseur)
+    if (key === 'intensification' || (key === 'attaque_surprise' && setupState.role === 'defender')) {
+        let maxReinf = (key === 'intensification') ? 5 : 7;
+        let remainingPool = availableMembers.filter(m => 
+            !setupState.initialPickedIds.includes(m.id) && 
+            !setupState.randomDrawnIds.includes(m.id) && 
+            m.id !== setupState.piousPickedId
+        );
+
+        html += `
+            <hr style="border-color:#333; margin:10px 0;">
+            <h4>Sélection des Renforts (Jusqu'à ${maxReinf})</h4>
+            <p style="font-size:12px; color:#aaa;">Ces combattants entreront en jeu plus tard et seront grisés avec la mention [RENFORT].</p>
+            
+            <div style="display:flex; flex-direction:column; gap:6px; max-height:30vh; overflow-y:auto; margin:10px 0;">
+        `;
+
+        remainingPool.forEach(m => {
+            let isChecked = setupState.reinforcementPickedIds.includes(m.id);
+            html += `
+                <div class="fighter-item" style="background:#111; padding:6px 10px;">
+                    <div>
+                        <strong>${m.customName}</strong> (${m.charName})
+                    </div>
+                    <input type="checkbox" style="transform:scale(1.3);" ${isChecked ? 'checked' : ''} onchange="toggleReinforcementPick('${m.id}', ${maxReinf})">
+                </div>
+            `;
+        });
+
+        html += `</div>`;
+    }
+
+    html += `
+        <br>
+        <button class="btn btn-cyan" onclick="startCampaignGame()">⚔️ Lancer la Partie avec ce Roster</button>
+        <button class="btn" style="margin-left:10px;" onclick="setupState.step = 1; renderGameSetup(document.getElementById('main-content'));">← Modifier étape 1</button>
+    `;
+
+    return html;
+}
+
+// ==========================================
+// RENDU DE LA SECTION PIOUS (PROSPECT)
+// ==========================================
+function renderPiousSection(availableMembers) {
+    let prospects = availableMembers.filter(m => isProspect(m));
+
+    let html = `
+        <div style="background:#221a08; border:1px solid #f39c12; padding:8px; border-radius:5px; margin-top:8px;">
+            <strong style="color:#f39c12;">Bonus Pious : Sélectionner 1 Prospect</strong><br>
+    `;
+
+    if (prospects.length === 0) {
+        html += `<small style="color:#aaa;">Aucun Prospect disponible dans votre bande.</small>`;
+    } else {
+        html += `
+            <select style="width:100%; padding:6px; margin-top:4px; background:#111; color:#fff; border:1px solid #444;" onchange="selectPiousProspect(this.value)">
+                <option value="">-- Choisir un Prospect (Optionnel) --</option>
+                ${prospects.map(p => `
+                    <option value="${p.id}" ${setupState.piousPickedId === p.id ? 'selected' : ''}>${p.customName} (${p.charName})</option>
+                `).join('')}
+            </select>
+        `;
+    }
+
+    html += `</div>`;
+    return html;
+}
+
+// ==========================================
+// ACTIONS DU MENU DE SETUP
+// ==========================================
+function changeScenario(key) {
+    resetSetupState();
+    setupState.scenarioKey = key;
+    renderGameSetup(document.getElementById('main-content'));
+}
+
+function changeRole(role) {
+    setupState.role = role;
+    setupState.initialPickedIds = [];
+    renderGameSetup(document.getElementById('main-content'));
+}
+
+function togglePious() {
+    setupState.piousActive = !setupState.piousActive;
+    if (!setupState.piousActive) setupState.piousPickedId = null;
+    renderGameSetup(document.getElementById('main-content'));
+}
+
+function selectPiousProspect(id) {
+    setupState.piousPickedId = id || null;
+}
+
+function toggleInitialPick(id, maxLimit) {
+    let idx = setupState.initialPickedIds.indexOf(id);
+    if (idx >= 0) {
+        setupState.initialPickedIds.splice(idx, 1);
+    } else {
+        if (setupState.initialPickedIds.length >= maxLimit) {
+            alert(`Limite atteinte pour cette étape (${maxLimit} guerriers max).`);
+            renderGameSetup(document.getElementById('main-content'));
+            return;
+        }
+        setupState.initialPickedIds.push(id);
+    }
+}
+
+function toggleReinforcementPick(id, maxLimit) {
+    let idx = setupState.reinforcementPickedIds.indexOf(id);
+    if (idx >= 0) {
+        setupState.reinforcementPickedIds.splice(idx, 1);
+    } else {
+        if (setupState.reinforcementPickedIds.length >= maxLimit) {
+            alert(`Limite atteinte (${maxLimit} renforts max).`);
+            renderGameSetup(document.getElementById('main-content'));
+            return;
+        }
+        setupState.reinforcementPickedIds.push(id);
+    }
+}
+
+function validateStep1() {
+    let key = setupState.scenarioKey;
+    let availableMembers = (currentGang.members || []).filter(m => !m.recovery);
+
+    // Pool restant disponible pour les tirages au sort
+    let remainingPool = availableMembers.filter(m => 
+        !setupState.initialPickedIds.includes(m.id) && 
+        m.id !== setupState.piousPickedId
+    );
+
+    if (key === 'intensification') {
+        if (setupState.initialPickedIds.length !== 3) return alert("Veuillez choisir exactement 3 guerriers.");
+        let nbRandom = Math.floor(Math.random() * 3) + 1; // 1 à 3
+        let drawn = getRandomFighters(remainingPool, nbRandom);
+        setupState.randomDrawnIds = drawn.map(m => m.id);
+    } 
+    else if (key === 'patrouille') {
+        if (setupState.initialPickedIds.length !== 3) return alert("Veuillez choisir exactement 3 guerriers.");
+        let drawn = getRandomFighters(remainingPool, 4);
+        setupState.randomDrawnIds = drawn.map(m => m.id);
+    }
+    else if (key === 'attaque_surprise') {
+        if (setupState.role === 'attacker') {
+            if (setupState.initialPickedIds.length !== 4) return alert("Veuillez choisir exactement 4 guerriers.");
+            let drawn = getRandomFighters(remainingPool, 4);
+            setupState.randomDrawnIds = drawn.map(m => m.id);
+        } else {
+            if (setupState.initialPickedIds.length !== 3) return alert("Veuillez choisir exactement 3 guerriers.");
+        }
+    }
+    else if (key === 'force_reconnaissance') {
+        if (setupState.initialPickedIds.length !== setupState.reconCount) return alert(`Veuillez choisir exactement ${setupState.reconCount} guerrier(s).`);
+        let drawn = getRandomFighters(remainingPool, 5);
+        setupState.randomDrawnIds = drawn.map(m => m.id);
+    }
+
+    setupState.step = 2;
+    renderGameSetup(document.getElementById('main-content'));
 }
 
 function inspectFighter(idx) {
@@ -519,70 +912,166 @@ function inspectFighter(idx) {
     if (typeof openModal === 'function') openModal(m.customName, html);
 }
 
-function startGame() {
-    const selectedIndexes = document.querySelectorAll('.roster-select:checked');
-    if (selectedIndexes.length === 0) return alert("Sélectionnez au moins un combattant.");
-
-    if (!confirm("Confirmer le lancement de la partie avec ces combattants ?")) return;
+// ==========================================
+// LANCEMENT DE LA PARTIE (CRÉATION ROSTER)
+// ==========================================
+function startCampaignGame() {
+    if (!confirm("Confirmer la sélection et lancer la partie ?")) return;
 
     currentGameRoster = [];
-    selectedIndexes.forEach(chk => {
-        let m = JSON.parse(JSON.stringify(currentGang.members[chk.value]));
-        m.currentHP = parseInt(m.stats ? m.stats.W : 1) || 1;
-        m.status = 'Prêt';
-        m.activated = false;
-        m.suppressed = false;
-        m.conditions = {};
 
-        // --- AUTOMATISATION DES CONDITIONS PERMANENTES ---
-        // 1. Vérification de la compétence Fearsome / Redoutable
-        const hasFearsomeSkill = (m.skills || []).some(s => {
-            let sName = (typeof s === 'string' ? s : (s.name || '')).toLowerCase();
-            let sId = (typeof s === 'object' && s.id) ? s.id : '';
-            return sId === 'sk_redoutable' || sName.includes('fearsome') || sName.includes('redoutable');
-        });
+    // 1. Ajout des guerriers initiaux
+    setupState.initialPickedIds.forEach(id => {
+        let m = currentGang.members.find(x => x.id === id);
+        if (m) addFighterToGameRoster(m, false);
+    });
 
-        // 2. Vérification d'une blessure permanente Fearsome / Redoutable
-        const hasFearsomeInjury = (m.injuries || []).some(inj => {
-            let injStr = (typeof inj === 'string' ? inj : '').toLowerCase();
-            return injStr.includes('fearsome') || injStr.includes('redoutable');
-        });
+    // 2. Ajout des guerriers tirés au sort
+    setupState.randomDrawnIds.forEach(id => {
+        let m = currentGang.members.find(x => x.id === id);
+        if (m) addFighterToGameRoster(m, false);
+    });
 
-        // Si le combattant a la compétence ou la blessure, on coche la condition automatiquement
-        if (hasFearsomeSkill || hasFearsomeInjury) {
-            m.conditions['Fearsome'] = true; // Remplace 'Fearsome' par 'Redoutable' si c'est le nom exact dans CUMULATIVE_CONDITIONS
-        }
+    // 3. Ajout du prospect Pious s'il y en a un
+    if (setupState.piousPickedId) {
+        let m = currentGang.members.find(x => x.id === setupState.piousPickedId);
+        if (m) addFighterToGameRoster(m, false);
+    }
 
-        // 3. Vérification de la compétence Berserker (Condition Frénésie)
-        const hasBerserkerSkill = (m.skills || []).some(s => {
-            let sName = (typeof s === 'string' ? s : (s.name || '')).toLowerCase();
-            let sId = (typeof s === 'object' && s.id) ? s.id : '';
-            return sId === 'sk_berserker' || sName.includes('berserker');
-        });
-
-        if (hasBerserkerSkill) {
-            m.conditions['Frénésie'] = true;
-        }
-        
-        if (m.weapons) {
-            m.weapons.forEach(w => {
-                w.outOfAmmo = false;
-                w.jammed = false;
-            });
-        }
-        
-        currentGameRoster.push(m);
+    // 4. Ajout des renforts (avec le drapeau isReinforcement = true)
+    setupState.reinforcementPickedIds.forEach(id => {
+        let m = currentGang.members.find(x => x.id === id);
+        if (m) addFighterToGameRoster(m, true);
     });
 
     gameTactics = JSON.parse(JSON.stringify(currentGang.tactics || []));
-    
+
     if (typeof appState !== 'undefined') appState.view = 'game-view';
     renderGameView(document.getElementById('main-content'));
 }
 
+// Fonction utilitaire de transfert vers le Roster de jeu
+function addFighterToGameRoster(memberObj, isReinforcement) {
+    let m = JSON.parse(JSON.stringify(memberObj));
+    m.currentHP = parseInt(m.stats ? m.stats.W : 1) || 1;
+    m.status = 'Prêt';
+    m.activated = false;
+    m.suppressed = false;
+    m.isReinforcement = isReinforcement;
+    m.conditions = {};
+
+    // Initialisation des compteurs d'XP en direct
+    m.liveXP = {
+        assistance: 0,
+        objective: 0,
+        seriouslyInjured: 0,
+        scenario: 0,
+        ooaKills: 0
+    };
+
+    // ... (Reste de la fonction inchangé)
+    // Automatisation Fearsome
+    const hasFearsomeSkill = (m.skills || []).some(s => {
+        let sName = (typeof s === 'string' ? s : (s.name || '')).toLowerCase();
+        let sId = (typeof s === 'object' && s.id) ? s.id : '';
+        return sId === 'sk_redoutable' || sName.includes('fearsome') || sName.includes('redoutable');
+    });
+    const hasFearsomeInjury = (m.injuries || []).some(inj => (typeof inj === 'string' ? inj : '').toLowerCase().includes('redoutable'));
+    if (hasFearsomeSkill || hasFearsomeInjury) m.conditions['Fearsome'] = true;
+
+    // Automatisation Berserker (Frénésie)
+    const hasBerserkerSkill = (m.skills || []).some(s => {
+        let sName = (typeof s === 'string' ? s : (s.name || '')).toLowerCase();
+        let sId = (typeof s === 'object' && s.id) ? s.id : '';
+        return sId === 'sk_berserker' || sName.includes('berserker');
+    });
+    if (hasBerserkerSkill) m.conditions['Frénésie'] = true;
+
+    if (m.weapons) {
+        m.weapons.forEach(w => {
+            w.outOfAmmo = false;
+            w.jammed = false;
+        });
+    }
+
+    currentGameRoster.push(m);
+}
+
+// Fonction de repli pour la partie rapide
+function renderQuickMatchSetup(container) {
+    let html = `
+        <div class="card">
+            <h2>Préparation Partie Rapide ⚡</h2>
+            <p>Sélectionnez les combattants qui participent à l'affrontement :</p><br>
+    `;
+
+    (currentGang.members || []).forEach((m, idx) => {
+        if (!m.recovery) {
+            html += `
+                <div class="fighter-item">
+                    <div>
+                        <strong>${m.customName}</strong> (${m.charName})<br>
+                        <small>${(m.type || []).join(', ')} - Coût : ${m.totalCost || 0}c</small>
+                    </div>
+                    <input type="checkbox" class="quick-roster-select" value="${m.id}" checked style="transform:scale(1.3);">
+                </div>
+            `;
+        }
+    });
+
+    html += `
+        <br>
+        <button class="btn btn-cyan" onclick="startQuickGame()">⚔️ Lancer la Partie Rapide</button>
+        <button class="btn-danger" onclick="safeNavigate('gang-manage')">Annuler</button>
+    </div>`;
+
+    container.innerHTML = html;
+}
+
+function startQuickGame() {
+    let selectedCbs = document.querySelectorAll('.quick-roster-select:checked');
+    if (selectedCbs.length === 0) return alert("Sélectionnez au moins un combattant.");
+
+    currentGameRoster = [];
+    selectedCbs.forEach(cb => {
+        let m = currentGang.members.find(x => x.id === cb.value);
+        if (m) addFighterToGameRoster(m, false);
+    });
+
+    gameTactics = JSON.parse(JSON.stringify(currentGang.tactics || []));
+    if (typeof appState !== 'undefined') appState.view = 'game-view';
+    renderGameView(document.getElementById('main-content'));
+}
 // ==========================================
 // GAME VIEW (Page Résumé & Actions)
 // ==========================================
+function deployReinforcement(idx) {
+    if (currentGameRoster[idx]) {
+        currentGameRoster[idx].isReinforcement = false;
+        renderGameView(document.getElementById('main-content'));
+    }
+}
+
+// ==========================================
+// SUIVI XP EN DIRECT (CAMPAGNE)
+// ==========================================
+function adjLiveXP(fighterIdx, key, delta) {
+    let m = currentGameRoster[fighterIdx];
+    if (!m) return;
+    if (!m.liveXP) {
+        m.liveXP = { assistance: 0, objective: 0, seriouslyInjured: 0, scenario: 0, ooaKills: 0 };
+    }
+    m.liveXP[key] = Math.max(0, (m.liveXP[key] || 0) + delta);
+    renderGameView(document.getElementById('main-content'));
+}
+
+function getFighterBattleXP(m) {
+    if (!m) return 1;
+    let lx = m.liveXP || { assistance: 0, objective: 0, seriouslyInjured: 0, scenario: 0, ooaKills: 0 };
+    // 1 XP automatique de participation + actions
+    return 1 + (lx.assistance || 0) + (lx.objective || 0) + (lx.seriouslyInjured || 0) + (lx.scenario || 0) + ((lx.ooaKills || 0) * 2);
+}
+
 function renderGameView(container) {
     setGameHeaderVisibility(true);
 
@@ -604,6 +1093,7 @@ function renderGameView(container) {
     currentGameRoster.forEach((m, idx) => {
         let activeConds = Object.keys(m.conditions || {}).filter(c => m.conditions[c]);
         let isOOA = (m.status === 'Out of action');
+        let isReinforcement = (m.isReinforcement === true);
 
         // Couleurs du nom : Grisé (OOA) > Rouge (Sérieusement blessé) > Jaune (Pilonné) > Orange (Blessé)
         let nameColor = '#ffffff';
@@ -617,50 +1107,117 @@ function renderGameView(container) {
             nameColor = '#e67e22';
         }
 
-        let ooaCardStyle = isOOA ? 'background: #141414; opacity: 0.45; filter: grayscale(1); border: 1px solid #333;' : '';
+        // Style visuel de la carte
+        let cardStyle = '';
+        if (isOOA) {
+            cardStyle = 'background: #141414; opacity: 0.45; filter: grayscale(1); border: 1px solid #333;';
+        } else if (isReinforcement) {
+            cardStyle = 'background: #181824; opacity: 0.6; border: 1px dashed var(--accent-purple, #9b59b6);';
+        }
 
+        // 1. CALCUL DU BLOC XP (AVANT LE CODE HTML)
+        let xpBlock = '';
+        if (!isQuick) {
+            let lx = m.liveXP || { assistance: 0, objective: 0, seriouslyInjured: 0, scenario: 0, ooaKills: 0 };
+            let currentTotalXP = getFighterBattleXP(m);
+
+            xpBlock = `
+                <div style="margin-top:10px; padding:8px; background:#111; border:1px solid #333; border-radius:4px; font-size:11px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                        <strong style="color:var(--accent-cyan);">⭐ XP en direct : <span style="color:#2ecc71; font-size:13px;">+${currentTotalXP} XP</span></strong>
+                        <small style="color:#aaa;">(1 XP de participation inclus)</small>
+                    </div>
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap:6px;">
+                        <div style="display:flex; align-items:center; gap:3px;">
+                            <span>Assistance :</span>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'assistance', -1)">-</button>
+                            <strong>${lx.assistance}</strong>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'assistance', 1)">+</button>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:3px;">
+                            <span>Objectif :</span>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'objective', -1)">-</button>
+                            <strong>${lx.objective}</strong>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'objective', 1)">+</button>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:3px;">
+                            <span>Sér. Blessé :</span>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'seriouslyInjured', -1)">-</button>
+                            <strong>${lx.seriouslyInjured}</strong>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'seriouslyInjured', 1)">+</button>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:3px;">
+                            <span>Scénario :</span>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'scenario', -1)">-</button>
+                            <strong>${lx.scenario}</strong>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'scenario', 1)">+</button>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:3px;">
+                            <span style="color:#e74c3c; font-weight:bold;">Ennemi OOA :</span>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'ooaKills', -1)">-</button>
+                            <strong style="color:#e74c3c;">${lx.ooaKills}</strong>
+                            <button class="btn" style="padding:0 4px; font-size:10px;" onclick="adjLiveXP(${idx}, 'ooaKills', 1)">+</button>
+                            <small style="color:#888;">(2 XP)</small>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // 2. ASSEMBLAGE DE LA CARTE EN HTML
         html += `
-            <div class="card" style="margin-bottom:0; ${ooaCardStyle}">
+            <div class="card" style="margin-bottom:0; ${cardStyle}">
                 <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
                     <div>
                         <strong style="font-size:16px; cursor:pointer; text-decoration:${isOOA ? 'line-through' : 'underline'}; color:${nameColor};" onclick="openFighterDetailModal(${idx})">
                             ${m.customName}
                         </strong> 
-                        <small style="color:${isOOA ? '#666' : 'inherit'};"> — <strong>${m.charName || ''}</strong> (${(m.type || []).join(', ')})</small><br>
+                        <small style="color:${isOOA ? '#666' : 'inherit'};"> — <strong>${m.charName || ''}</strong> (${(m.type || []).join(', ')})</small>
+                        ${isReinforcement ? `<span style="background:var(--accent-purple, #9b59b6); color:#fff; padding:2px 6px; border-radius:3px; font-size:11px; font-weight:bold; margin-left:6px;">RENFORT</span>` : ''}
+                        <br>
                         <small style="color:${isOOA ? '#666' : 'inherit'};">Armes : ${(m.weapons || []).map(w => w.name + (w.accessory ? ' ['+w.accessory.name+']' : '')).join(', ') || 'Aucune'}</small>
                         ${activeConds.length > 0 ? `<br><small style="color:${isOOA ? '#666' : '#e67e22'};"><strong>Conditions :</strong> ${activeConds.map(c => `<span style="cursor:pointer; text-decoration:underline;" onclick="showConditionDetails('${c.replace(/'/g, "\\'")}')">${c}</span>`).join(', ')}</small>` : ''}
                     </div>
 
                     <div style="display:flex; align-items:center; gap:10px; margin-top:5px; flex-wrap:wrap;">
-                        <!-- POINTS DE VIE MODIFIABLES DIRECTEMENT -->
-                        <div style="display:flex; align-items:center; gap:3px;">
-                            <span>PV :</span>
-                            <button class="btn" style="padding:1px 5px; font-weight:bold;" onclick="adjHP(${idx}, -1)">-</button>
-                            <strong style="font-size:15px; min-width:16px; text-align:center;">${m.currentHP}</strong> / ${m.stats ? m.stats.W : 1}
-                            <button class="btn" style="padding:1px 5px; font-weight:bold;" onclick="adjHP(${idx}, 1)">+</button>
-                        </div>
+                        ${isReinforcement ? `
+                            <button class="btn btn-cyan" style="padding:4px 10px; font-size:12px;" onclick="deployReinforcement(${idx})">⚡ Faire entrer en jeu</button>
+                        ` : `
+                            <!-- POINTS DE VIE MODIFIABLES DIRECTEMENT -->
+                            <div style="display:flex; align-items:center; gap:3px;">
+                                <span>PV :</span>
+                                <button class="btn" style="padding:1px 5px; font-weight:bold;" onclick="adjHP(${idx}, -1)">-</button>
+                                <strong style="font-size:15px; min-width:16px; text-align:center;">${m.currentHP}</strong> / ${m.stats ? m.stats.W : 1}
+                                <button class="btn" style="padding:1px 5px; font-weight:bold;" onclick="adjHP(${idx}, 1)">+</button>
+                            </div>
 
-                        <!-- MENU DÉROULANT DES ÉTATS -->
-                        <div>
-                            <select style="background:#222; color:#fff; border:1px solid #444; padding:3px 5px; border-radius:4px; font-size:12px;" onchange="updateFighterStatus(${idx}, this.value)">
-                                <option value="Prêt" ${m.status === 'Prêt' ? 'selected' : ''}>Prêt</option>
-                                <option value="Engagé" ${m.status === 'Engagé' ? 'selected' : ''}>Engagé</option>
-                                <option value="Pilonné" ${m.status === 'Pilonné' ? 'selected' : ''}>Pilonné</option>
-                                <option value="Sérieusement blessé" ${m.status === 'Sérieusement blessé' ? 'selected' : ''}>Sérieusement blessé</option>
-                                <option value="Out of action" ${m.status === 'Out of action' ? 'selected' : ''}>Out of action</option>
-                            </select>
-                        </div>
+                            <!-- MENU DÉROULANT DES ÉTATS -->
+                            <div>
+                                <select style="background:#222; color:#fff; border:1px solid #444; padding:3px 5px; border-radius:4px; font-size:12px;" onchange="updateFighterStatus(${idx}, this.value)">
+                                    <option value="Prêt" ${m.status === 'Prêt' ? 'selected' : ''}>Prêt</option>
+                                    <option value="Engagé" ${m.status === 'Engagé' ? 'selected' : ''}>Engagé</option>
+                                    <option value="Pilonné" ${m.status === 'Pilonné' ? 'selected' : ''}>Pilonné</option>
+                                    <option value="Sérieusement blessé" ${m.status === 'Sérieusement blessé' ? 'selected' : ''}>Sérieusement blessé</option>
+                                    <option value="Out of action" ${m.status === 'Out of action' ? 'selected' : ''}>Out of action</option>
+                                </select>
+                            </div>
 
-                        <div>
-                            <label style="cursor:pointer; font-size:12px;">
-                                <input type="checkbox" ${m.activated ? 'checked' : ''} onchange="toggleActivation(${idx})"> Activé
-                            </label>
-                        </div>
+                            <div>
+                                <label style="cursor:pointer; font-size:12px;">
+                                    <input type="checkbox" ${m.activated ? 'checked' : ''} onchange="toggleActivation(${idx})"> Activé
+                                </label>
+                            </div>
+                        `}
                     </div>
                 </div>
+
+                <!-- INJECTION PROPRE DU BLOC XP -->
+                ${xpBlock}
+
             </div>
         `;
     });
+
 
     html += `
         </div> <!-- FIN DU CONTENEUR SUR 2 COLONNES -->
@@ -712,9 +1269,15 @@ function endGame() {
         currentGameRoster.forEach(battleFighter => {
             let gangFighter = currentGang.members.find(m => m.id === battleFighter.id || m.customName === battleFighter.customName);
             if (gangFighter) {
-                if (battleFighter.status === 'Out of action' || battleFighter.currentHP <= 0) {
-                    gangFighter.ooa = true;
-                }
+                // Statut Out of Action
+                gangFighter.ooa = (battleFighter.status === 'Out of action' || battleFighter.currentHP <= 0);
+
+                // Récupération XP actuelle + XP gagnée en bataille
+                let currentXP = getFighterXP(gangFighter);
+                let matchXP = getFighterBattleXP(battleFighter);
+
+                // Mise à jour exacte
+                gangFighter.xp = currentXP + matchXP;
             }
         });
         safeSave();
@@ -1016,8 +1579,8 @@ function renderPostBattleView(container) {
     updateGameTopBar();
 
     let ooaFighters = (currentGang.members || []).filter(m => m.ooa === true);
+    let totalEnemiesOOA = currentGameRoster.reduce((sum, m) => sum + ((m.liveXP && m.liveXP.ooaKills) ? m.liveXP.ooaKills : 0), 0);
 
-    // Préparation des listes déroulantes pour les territoires
     let dbTerritories = (typeof db !== 'undefined' && db.territories) ? db.territories : [];
     let gangTerritories = currentGang.territories || [];
 
@@ -1056,45 +1619,14 @@ function renderPostBattleView(container) {
         });
     }
 
-    html += `
-            <hr style="margin: 15px 0; border-color: #333;">
-            <h3>2. Attribution de l'Expérience (XP)</h3>
-            <div class="roster-list">
-    `;
-
-    (currentGang.members || []).forEach(m => {
-        let pendingAdvances = getPendingAdvances(m);
-        let btnLevelUp = pendingAdvances > 0 
-            ? `<button class="btn btn-cyan" onclick="openLevelUpModal('${m.id}')">⭐ Montée de Niveau (${pendingAdvances})</button>`
-            : `<button class="btn" disabled style="opacity:0.4; cursor:not-allowed;">⭐ Montée de Niveau (0)</button>`;
-
-        html += `
-            <div class="fighter-item" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
-                <div>
-                    <strong>${m.customName}</strong> | XP : <strong>${getFighterXP(m)}</strong> (Rang ${getFighterRank(getFighterXP(m))})
-                </div>
-                <div style="display:flex; gap:4px; flex-wrap:wrap; align-items:center;">
-                    <button class="btn" onclick="addFighterXP('${m.id}', 1)">+1 XP (Partic.)</button>
-                    <button class="btn" onclick="addFighterXP('${m.id}', 1)">+1 XP (Assistance)</button>
-                    <button class="btn" onclick="addFighterXP('${m.id}', 1)">+1 XP (Scénario)</button>
-                    <button class="btn" onclick="addFighterXP('${m.id}', 1)">+1 XP (Injure)</button>
-                    <button class="btn" onclick="addFighterXP('${m.id}', 2)">+2 XP (OOA)</button>
-                    <button class="btn" onclick="addFighterXP('${m.id}', 1)">+1 XP (Obj.)</button>
-                    ${btnLevelUp}
-                </div>
-            </div>
-        `;
-    });
-
     let baseRep = (currentGang.reputation !== undefined) ? currentGang.reputation : 1;
     let totalRep = calculateGangReputation(currentGang);
     let territoryBonus = totalRep - baseRep;
 
     html += `
-            </div>
             <hr style="margin: 15px 0; border-color: #333;">
 
-            <h3>3. Rapport & Enregistrement de la Bataille</h3>
+            <h3>2. Rapport & Enregistrement de la Bataille</h3>
             <div style="background:#111; border:1px solid var(--accent-purple, #9b59b6); padding:12px; border-radius:6px; margin-bottom:15px;">
                 <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:10px; margin-bottom:10px;">
                     <div>
@@ -1115,11 +1647,15 @@ function renderPostBattleView(container) {
                     </div>
                     <div>
                         <label style="font-size:12px;">Gain Cr. Mission Principale :</label>
-                        <input type="number" id="hist-cred-primary" value="0" min="0" style="width:100%; padding:4px;">
+                        <input type="number" id="hist-cred-primary" value="0" min="0" step="10" style="width:100%; padding:4px;">
                     </div>
                     <div>
                         <label style="font-size:12px;">Gain Cr. Mission Sec. :</label>
-                        <input type="number" id="hist-cred-secondary" value="0" min="0" style="width:100%; padding:4px;">
+                        <input type="number" id="hist-cred-secondary" value="0" min="0" step="10" style="width:100%; padding:4px;">
+                    </div>
+                    <div>
+                        <label style="font-size:12px;">Ennemis mis OOA (calculé) :</label>
+                        <input type="text" value="${totalEnemiesOOA}" disabled style="width:100%; padding:4px; background:#222; color:#2ecc71; font-weight:bold;">
                     </div>
                     <div>
                         <label style="font-size:12px;">Variation Réputation (+/-) :</label>
@@ -1145,16 +1681,11 @@ function renderPostBattleView(container) {
             </div>
 
             <hr style="margin: 15px 0; border-color: #333;">
-            <h3>4. Territoires & Réputation Actuels</h3>
+            <h3>3. Territoires & Réputation Actuels</h3>
             <p>
                 Réputation Totale : <strong style="color:#2ecc71; font-size:16px;">${totalRep}</strong> 
                 <small style="color:#aaa;">(Base : ${baseRep}${territoryBonus > 0 ? ` | Bonus Territoires : +${territoryBonus}` : ''})</small>
             </p>
-            <div style="display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap;">
-                <button class="btn btn-cyan" onclick="adjustReputation(1)">+1 Réputation</button>
-                <button class="btn btn-cyan" onclick="adjustReputation(2)">+2 Réputation</button>
-                <button class="btn" onclick="adjustReputation(-1)">-1 Réputation</button>
-            </div>
             <button class="btn btn-cyan" onclick="openTerritoriesModal()">🚩 Gérer les Territoires (${(currentGang.territories || []).length})</button>
         </div>
     `;
@@ -1271,9 +1802,137 @@ function startPostCycleView(container) {
     renderPostCycleView(container);
 }
 
+function confirmNewCycle() {
+    if (!confirm('Réinitialiser toutes les actions et territoires pour un nouveau cycle, et lever les convalescences (Recovery) ?')) return;
+
+    // 1. Libère les territoires et réinitialise la session
+    resetPostCycleSession();
+
+    // 2. Rétablit les guerriers en convalescence
+    if (typeof currentGang !== 'undefined' && currentGang && currentGang.members) {
+        currentGang.members.forEach(m => {
+            m.recovery = false;
+        });
+        safeSave();
+    }
+
+    alert("Nouveau cycle démarré : territoires libérés et guerriers rétablis !");
+    renderPostCycleView(document.getElementById('main-content'));
+}
+
 // ==========================================
 // 2. SÉQUENCE POST-CYCLE
 // ==========================================
+function openFighterPostCycleEquipmentModal(fighterId) {
+    if (!currentGang) return;
+    let m = currentGang.members.find(x => x.id === fighterId);
+    if (!m) return;
+
+    if (!m.weapons) m.weapons = [];
+    if (!m.equipment) m.equipment = [];
+    if (!currentGang.stash) currentGang.stash = [];
+
+    let html = `
+        <div style="max-height:65vh; overflow-y:auto; padding-right:5px;">
+            <h3>Gérer l'Équipement — ${m.customName}</h3>
+            <p>Crédits du Gang : <strong style="color:#2ecc71;">${currentGang.credits || 0} cr</strong></p>
+            <hr style="margin:10px 0; border-color:#333;">
+
+            <h4>🎒 Équipement Actuel</h4>
+            <div style="margin-bottom:15px;">
+                <strong>Armes :</strong>
+                <ul>
+                    ${m.weapons.map((w, idx) => `
+                        <li style="margin-bottom:4px;">
+                            ${w.name} ${w.accessory ? '[' + w.accessory.name + ']' : ''}
+                            <button class="btn btn-danger" style="padding:1px 6px; font-size:10px; margin-left:8px;" onclick="unequipItemToStash('${m.id}', 'weapon', ${idx})">Mettre au Stash</button>
+                        </li>
+                    `).join('') || '<li style="color:#888;">Aucune arme.</li>'}
+                </ul>
+
+                <strong>Équipements / Armures :</strong>
+                <ul>
+                    ${m.equipment.map((e, idx) => `
+                        <li style="margin-bottom:4px;">
+                            ${e.name}
+                            <button class="btn btn-danger" style="padding:1px 6px; font-size:10px; margin-left:8px;" onclick="unequipItemToStash('${m.id}', 'equipment', ${idx})">Mettre au Stash</button>
+                        </li>
+                    `).join('') || '<li style="color:#888;">Aucun équipement.</li>'}
+                </ul>
+            </div>
+
+            <hr style="margin:10px 0; border-color:#333;">
+
+            <h4>📦 Équiper depuis le Stash</h4>
+            <div style="display:flex; flex-direction:column; gap:6px; margin-bottom:15px;">
+    `;
+
+    if (currentGang.stash.length === 0) {
+        html += `<p style="color:#888; font-size:12px;">Aucun objet disponible dans le Stash.</p>`;
+    } else {
+        currentGang.stash.forEach((item, idx) => {
+            let itemName = typeof item === 'string' ? item : item.name;
+            let itemType = (typeof item === 'object' && item.type) ? item.type : 'Équipement';
+
+            html += `
+                <div style="background:#111; border:1px solid #333; padding:6px; border-radius:4px; display:flex; justify-content:space-between; align-items:center;">
+                    <span><strong>${itemName}</strong> <small style="color:#aaa;">(${itemType})</small></span>
+                    <button class="btn btn-cyan" style="padding:2px 8px; font-size:11px;" onclick="equipItemFromStash('${m.id}', ${idx})">Équiper</button>
+                </div>
+            `;
+        });
+    }
+
+    html += `
+            </div>
+            <p style="font-size:11px; color:#aaa; font-style:italic;">🔒 Les compétences ne peuvent être modifiées qu'en montant de niveau.</p>
+        </div>
+        <br>
+        <button class="btn" onclick="if (typeof closeModal==='function') closeModal()">Fermer</button>
+    `;
+
+    if (typeof openModal === 'function') openModal(`Équipement : ${m.customName}`, html);
+}
+
+function unequipItemToStash(fighterId, type, itemIdx) {
+    if (!currentGang) return;
+    let m = currentGang.members.find(x => x.id === fighterId);
+    if (!m) return;
+    if (!currentGang.stash) currentGang.stash = [];
+
+    if (type === 'weapon' && m.weapons[itemIdx]) {
+        let w = m.weapons.splice(itemIdx, 1)[0];
+        currentGang.stash.push({ name: w.name, type: 'Arme', cost: w.cost || w.cost_credits || 0 });
+    } else if (type === 'equipment' && m.equipment[itemIdx]) {
+        let e = m.equipment.splice(itemIdx, 1)[0];
+        currentGang.stash.push({ name: e.name, type: 'Équipement', cost: e.cost || e.cost_credits || 0 });
+    }
+
+    safeSave();
+    openFighterPostCycleEquipmentModal(fighterId);
+}
+
+function equipItemFromStash(fighterId, stashIdx) {
+    if (!currentGang || !currentGang.stash[stashIdx]) return;
+    let m = currentGang.members.find(x => x.id === fighterId);
+    if (!m) return;
+
+    let item = currentGang.stash.splice(stashIdx, 1)[0];
+    let type = (typeof item === 'object' && item.type) ? item.type.toLowerCase() : 'équipement';
+
+    if (!m.weapons) m.weapons = [];
+    if (!m.equipment) m.equipment = [];
+
+    if (type.includes('arme')) {
+        m.weapons.push(typeof item === 'object' ? item : { name: item });
+    } else {
+        m.equipment.push(typeof item === 'object' ? item : { name: item });
+    }
+
+    safeSave();
+    openFighterPostCycleEquipmentModal(fighterId);
+}
+
 function renderPostCycleView(container) {
     if (typeof appState !== 'undefined') appState.view = 'post-cycle';
     if (!container) container = document.getElementById('main-content');
@@ -1296,7 +1955,7 @@ function renderPostCycleView(container) {
             </div>
             <div style="margin-top:10px; display:flex; gap:10px;">
                 <button class="btn" onclick="safeNavigate('gang-manage')">← Retour Gestion du Gang</button>
-                <button class="btn btn-cyan" onclick="if(confirm('Réinitialiser toutes les actions et territoires pour un nouveau cycle ?')) { resetPostCycleSession(); renderPostCycleView(); }">🔄 Nouveau Cycle / Réinitialiser</button>
+                <button class="btn btn-cyan" onclick="confirmNewCycle()">🔄 Nouveau Cycle / Réinitialiser</button>
             </div>
             <hr style="margin: 15px 0; border-color: #333;">
 
@@ -1972,6 +2631,8 @@ function openLevelUpModal(fighterId) {
     let skillsDB = (typeof db !== 'undefined' && db.skills) ? db.skills : {};
     let skillOptionsHTML = '';
     Object.keys(skillsDB).forEach(cat => {
+        let catLower = cat.toLowerCase();
+        if (catLower.includes('générique') || catLower.includes('generique') || catLower.includes('base')) return;
         skillOptionsHTML += `<optgroup label="${cat.toUpperCase()}">`;
         skillsDB[cat].forEach(sk => {
             let skName = typeof sk === 'string' ? sk : sk.name;
@@ -2028,12 +2689,14 @@ function confirmStatLevelUp(fighterId, statKey, cost) {
     if (!m) return;
 
     applyStatUpgrade(m, statKey);
+    
+    // Cumul du coût spécifique aux montées de niveau
+    m.advancesCost = (m.advancesCost || 0) + cost;
     m.totalCost = (m.totalCost || m.cost || 0) + cost;
-    m.cost = (m.cost || 0) + cost;
     m.advancesCount = (m.advancesCount || 0) + 1;
 
     safeSave();
-    alert(`Statistique ${statKey} augmentée (+${cost} cr au guerrier) !`);
+    alert(`Statistique ${statKey} augmentée (+${cost} cr) !`);
 
     if (getPendingAdvances(m) > 0) {
         openLevelUpModal(fighterId);
@@ -2058,6 +2721,7 @@ function confirmSkillLevelUp(fighterId) {
 
     if (!m.skills) m.skills = [];
 
+    // Recherche de l'objet compétence complet (avec sa description)
     let foundObj = null;
     if (typeof db !== 'undefined' && db.skills) {
         for (let cat in db.skills) {
@@ -2067,8 +2731,10 @@ function confirmSkillLevelUp(fighterId) {
     }
 
     m.skills.push(foundObj ? JSON.parse(JSON.stringify(foundObj)) : skillName);
+    
+    // Enregistrement des coûts d'avancée et de la valeur du guerrier
+    m.advancesCost = (m.advancesCost || 0) + cost;
     m.totalCost = (m.totalCost || m.cost || 0) + cost;
-    m.cost = (m.cost || 0) + cost;
     m.advancesCount = (m.advancesCount || 0) + 1;
 
     safeSave();
@@ -2112,6 +2778,8 @@ function openSkillSelectModal(fighterId) {
 
     let skillsDB = (typeof db !== 'undefined' && db.skills) ? db.skills : {};
     Object.keys(skillsDB).forEach(cat => {
+        let catLower = cat.toLowerCase();
+        if (catLower.includes('générique') || catLower.includes('generique') || catLower.includes('base')) return;
         let catNorm = norm(cat);
         let isPrimary = primaryNorms.includes(catNorm);
         let isSecondary = secondaryNorms.includes(catNorm);
@@ -2421,6 +3089,7 @@ function openPdfModal(title, url) {
     openModal(title, html);
 }
 
+// Validation, sauvegarde dynamique et affichage du rapport de campagne
 function saveMatchToHistory() {
     if (!currentGang) return;
 
@@ -2478,7 +3147,6 @@ function saveMatchToHistory() {
     safeSave();
     updateGameTopBar();
 
-    alert(`Partie enregistrée ! (${result} contre ${opponentName})`);
     renderPostBattleView(document.getElementById('main-content'));
 }
 
