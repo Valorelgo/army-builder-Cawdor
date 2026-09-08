@@ -652,6 +652,9 @@ function calculateFighterCost(m) {
         }
     });
     
+    // Ajout du coût des montées de niveau et compétences
+    total += (m.advancesCost || 0);
+    
     return total;
 }
 
@@ -843,20 +846,21 @@ function renderGangManage(container) {
         html += `<p style="margin-top:10px;">Aucun membre recruté.</p>`;
     } else {
         currentGang.members.forEach((m, idx) => {
-            let st = m.stats || {};
-            
-            html += `
-            <div class="card" style="margin-top:10px; background:#181818; border:1px solid var(--border-color);">
-                <div class="fighter-item" style="border:none; padding:0 0 10px 0;">
-                    <div>
-                        <strong>${m.customName || 'Sans nom'}</strong> (${m.charName})<br>
-                        <small>Coût: ${m.totalCost}c | Type: ${(m.type || []).join(', ')}</small>
-                    </div>
-                    <div>
-                        <button onclick="editFighter(${idx})">Équipement & Compétences</button>
-                        <button class="btn-danger" onclick="removeFighter(${idx})">Licencier</button>
-                    </div>
-                </div>
+    let st = m.stats || {};
+    let xp = (typeof getFighterXP === 'function') ? getFighterXP(m) : (m.xp || 0);
+    
+    html += `
+    <div class="card" style="margin-top:10px; background:#181818; border:1px solid var(--border-color);">
+        <div class="fighter-item" style="border:none; padding:0 0 10px 0;">
+            <div>
+                <strong>${m.customName || 'Sans nom'}</strong> (${m.charName})<br>
+                <small>Coût : ${m.totalCost}c | Type : ${(m.type || []).join(', ')} | XP : <strong style="color:var(--accent-cyan);">${xp}</strong></small>
+            </div>
+            <div>
+                <button onclick="editFighter(${idx})">Équipement & Compétences</button>
+                <button class="btn-danger" onclick="removeFighter(${idx})">Licencier</button>
+            </div>
+        </div>
 
                 <div style="overflow-x:auto; background:#111; padding:8px; border-radius:4px; border:1px solid #333;">
                     <div style="display:flex; justify-content:space-between; gap:4px; text-align:center; min-width:600px;">
